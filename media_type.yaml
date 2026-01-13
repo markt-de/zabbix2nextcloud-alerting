@@ -1,0 +1,204 @@
+zabbix_export:
+  version: '7.0'
+  media_types:
+    - name: 'Nextcloud Talk'
+      type: WEBHOOK
+      parameters:
+        - name: alert_message
+          value: '{ALERT.MESSAGE}'
+        - name: alert_send_to
+          value: '{ALERT.SENDTO}'
+        - name: alert_subject
+          value: '{ALERT.SUBJECT}'
+        - name: auth_token
+          value: '<TOKEN>'
+        - name: endpoint_baseurl
+          value: '</nc/ocs/v2.php/apps/spreed/api/v1/chat>'
+        - name: endpoint_host
+          value: '<https://host.company.org>'
+        - name: event_nseverity
+          value: '{EVENT.NSEVERITY}'
+        - name: event_tags
+          value: '{EVENT.TAGS}'
+        - name: event_tagsjson
+          value: '{EVENT.TAGSJSON}'
+        - name: HTTPProxy
+        - name: silent_nseverities
+          value: '<0,1,2,3,4>'
+      script: |
+        function getMessageID(tagstring) {
+            tags = [];
+        
+            JSON.parse(tagstring).forEach(function (item, index) {
+                if ('tag' in item && item['tag'] === 'nct_id') {
+                    tags.push(item['value']);
+                }
+            });
+        
+            return tags[0]
+        }
+        
+        function validateParams(params) {
+            if (typeof params.alert_send_to !== 'string' || params.alert_send_to.trim() === '') {
+                throw 'Field "alert_send_to" cannot be empty';
+            }
+        
+            if (typeof params.auth_token !== 'string' || params.auth_token.trim() === '') {
+                throw 'Field "auth_token" cannot be empty';
+            }
+        
+            if (typeof params.endpoint_baseurl !== 'string' || params.endpoint_baseurl.trim() === '') {
+                throw 'Field "endpoint_baseurl" cannot be empty';
+            }
+        
+            if (typeof params.endpoint_host !== 'string' || params.endpoint_host.trim() === '') {
+                throw 'Field "endpoint_host" cannot be empty';
+            }
+        }
+        
+        function validateCreate(response) {
+            try {
+                response = JSON.parse(response);
+            }
+            catch (error) {
+                throw 'Server did not return a JSON object';
+            }
+        
+            if (response['ocs']['meta']['statuscode'] != 201) {
+                throw 'Server responded with statuscode ' + response['ocs']['meta']['statuscode'] + ' (' + response['ocs']['meta']['status'] + '): ' + response['ocs']['meta']['message'];
+            }
+        }
+        
+        function validateUpdate(response) {
+            try {
+                response = JSON.parse(response);
+            }
+            catch (error) {
+                throw 'Server did not return a JSON object';
+            }
+        
+            if (response['ocs']['meta']['statuscode'] != 200 && response['ocs']['meta']['statuscode'] != 202) {
+                throw 'Server responded with statuscode ' + response['ocs']['meta']['statuscode'] + ' (' + response['ocs']['meta']['status'] + '): ' + response['ocs']['meta']['message'];
+            }
+        }
+        
+        function createMessage(params) {
+            var request = new HttpRequest(),
+                message_body = {},
+                response,
+                silenced = [],
+                result = {tags: {}};
+        
+            if (typeof params.HTTPProxy === 'string' && params.HTTPProxy.trim() !== '') {
+                request.setProxy(params.HTTPProxy);
+            }
+        
+            if (typeof params.silent_nseverities === 'string' && params.silent_nseverities.trim() !== '') {
+                silenced = params.silent_nseverities.split(',').map(function(e) {return e.trim();});
+            }
+        
+            request.addHeader('Content-Type: application/json');
+            request.addHeader('Accept: application/json');
+            request.addHeader('OCS-APIRequest: true');
+            request.addHeader('Authorization: Bearer ' + params.auth_token);
+        
+            url = params.endpoint_host + '/' + params.endpoint_baseurl + '/' + params.alert_send_to
+        
+            message_body.message = '## ';
+            message_body.message += params.alert_subject;
+            message_body.message += '\n\n';
+            message_body.message += params.alert_message;
+        
+            if (silenced.length > 0) {
+                if (silenced.indexOf(params.event_nseverity) !== -1) {
+                    message_body.silent = true;
+                }
+            }
+        
+            Zabbix.log(4, '[Nextcloud Talk Webhook] sending body: ' + JSON.stringify(message_body));
+            response = request.post(url, JSON.stringify(message_body));
+            Zabbix.log(4, '[Nextcloud Talk Webhook] received response: ' + response);
+        
+            validateCreate(response);
+        
+            result.tags.nct_id = JSON.parse(response)['ocs']['data']['id']
+        
+            return JSON.stringify(result);
+        }
+        
+        function updateMessage(params) {
+            var request = new HttpRequest(),
+                message_body = {},
+                response,
+                result = 'OK';
+        
+            if (typeof params.HTTPProxy === 'string' && params.HTTPProxy.trim() !== '') {
+                request.setProxy(params.HTTPProxy);
+            }
+        
+            request.addHeader('Content-Type: application/json');
+            request.addHeader('Accept: application/json');
+            request.addHeader('OCS-APIRequest: true');
+            request.addHeader('Authorization: Bearer ' + params.auth_token);
+        
+            url = params.endpoint_host + '/' + params.endpoint_baseurl + '/' + params.alert_send_to + '/' + getMessageID(params.event_tagsjson)
+        
+            message_body.message = '### ';
+            message_body.message += params.alert_subject;
+            message_body.message += '\n\n';
+            message_body.message += params.alert_message;
+        
+            Zabbix.log(4, '[Nextcloud Talk Webhook] sending body: ' + JSON.stringify(message_body));
+            response = request.put(url, JSON.stringify(message_body));
+            Zabbix.log(4, '[Nextcloud Talk Webhook] received response: ' + response);
+        
+            validateUpdate(response);
+        
+            return result;
+        }
+        
+        try {
+            var params = JSON.parse(value);
+        
+            validateParams(params);
+        
+            if (params.event_tags.search(/nct_id:/) > -1) {
+                return updateMessage(params);
+            }
+            else {
+                return createMessage(params);
+            }
+        }
+        catch (err) {
+            Zabbix.log(3, '[Nextcloud Talk Webhook] notification failed: ' + err);
+            throw 'Nextcloud Talk notification failed: ' + err;
+        }
+      process_tags: 'YES'
+      description: 'Send chat messages to a conversation in Nextcloud Talk'
+      message_templates:
+        - event_source: TRIGGERS
+          operation_mode: PROBLEM
+          subject: '🔥 {EVENT.DATE} {EVENT.TIME}: {EVENT.STATUS} ({EVENT.SEVERITY})'
+          message: |
+            {EVENT.NAME}:
+            - `{HOST.NAME1}`: {ITEM.NAME1}: {ITEM.VALUE1}
+            - Duration: {EVENT.DURATION}
+            - Acknowledged: {EVENT.ACK.STATUS}
+        - event_source: TRIGGERS
+          operation_mode: RECOVERY
+          subject: '✅ {EVENT.DATE} {EVENT.TIME}: {EVENT.STATUS}'
+          message: |
+            {EVENT.NAME}:
+            - `{HOST.NAME1}`: {ITEM.NAME1}: {ITEM.VALUE1}
+            - Duration: {EVENT.DURATION}
+            - Recovered: {EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}
+        - event_source: TRIGGERS
+          operation_mode: UPDATE
+          subject: '🚨 {EVENT.DATE} {EVENT.TIME}: {EVENT.STATUS} ({EVENT.SEVERITY})'
+          message: |
+            {EVENT.NAME}:
+            - `{HOST.NAME1}`: {ITEM.NAME1}: {ITEM.VALUE1}
+            - Duration: {EVENT.DURATION}
+            - Action: {EVENT.UPDATE.ACTION} ({EVENT.UPDATE.DATE} {EVENT.UPDATE.TIME})
+            - Acknowledged: {EVENT.ACK.STATUS}
+            - Message: {EVENT.UPDATE.MESSAGE}
